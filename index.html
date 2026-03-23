@@ -950,38 +950,6 @@
         firebase.initializeApp(firebaseConfig);
         const db = firebase.firestore();
 
-        // 🔔 Notification Permission
-        if ("Notification" in window) {
-            if (Notification.permission !== "granted") {
-                Notification.requestPermission();
-            }
-        }
-
-        // 🔔 Title Blink System
-        let originalTitle = document.title;
-        let blinkInterval = null;
-
-        function startTitleBlink(msg) {
-            if (blinkInterval) return;
-            blinkInterval = setInterval(() => {
-                document.title = document.title === originalTitle
-                    ? "💬 " + msg
-                    : originalTitle;
-            }, 1000);
-        }
-
-        function stopTitleBlink() {
-            clearInterval(blinkInterval);
-            blinkInterval = null;
-            document.title = originalTitle;
-        }
-
-        window.addEventListener("focus", stopTitleBlink);
-
-        document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) stopTitleBlink();
-        });
-
         // ── State ──
         let currentRoom = null;
         let unsubscribe = null;
@@ -1015,14 +983,10 @@
             s.onclick = () => { insertEmoji(e); toggleEmoji(false); };
             picker.appendChild(s);
         });
-
         function insertEmoji(e) {
             const el = document.getElementById('msgInput');
-            el.value += e;
-            el.focus();
-            autoGrow(el);
+            el.value += e; el.focus(); autoGrow(el);
         }
-
         function toggleEmoji(force) {
             if (force === false) { picker.classList.remove('open'); return; }
             picker.classList.toggle('open');
@@ -1031,112 +995,298 @@
         // ── Toast ──
         function showToast(msg) {
             const t = document.getElementById('toast');
-            t.textContent = msg;
-            t.classList.add('show');
+            t.textContent = msg; t.classList.add('show');
             setTimeout(() => t.classList.remove('show'), 2500);
         }
 
-        // ── Setup ──
+        // ── Setup (first time) ──
         function setupUser() {
             const name = document.getElementById('setupName').value.trim();
             const room = document.getElementById('setupRoom').value.trim();
-            if (!name) return showToast('Please enter your name!');
-            if (!room) return showToast('Please enter a room name!');
+            if (!name) { showToast('Please enter your name!'); return; }
+            if (!room) { showToast('Please enter a room name!'); return; }
             myName = name;
             localStorage.setItem('chatUsername', name);
-            if (!rooms.includes(room)) rooms.push(room);
-            localStorage.setItem('chatRooms', JSON.stringify(rooms));
+            if (!rooms.includes(room)) { rooms.push(room); localStorage.setItem('chatRooms', JSON.stringify(rooms)); }
             document.getElementById('setupScreen').style.display = 'none';
             initApp();
             openRoom(room);
+            if (roomFromURL && roomFromURL !== room && !rooms.includes(roomFromURL)) {
+                rooms.push(roomFromURL);
+                localStorage.setItem('chatRooms', JSON.stringify(rooms));
+                renderRooms();
+            }
         }
 
+        // ── Init App UI ──
         function initApp() {
             document.getElementById('sidebar').style.display = 'flex';
             document.getElementById('chatArea').style.display = 'flex';
             document.getElementById('welcomeScreen').style.display = 'flex';
+            updateMyAvatar();
             renderRooms();
+            if (window.innerWidth <= 700) {
+                document.getElementById('chatHeader').style.display = 'none';
+                document.getElementById('messagesContainer').style.display = 'none';
+                document.getElementById('inputArea').style.display = 'none';
+            }
         }
+
+        function updateMyAvatar() {
+            const el = document.getElementById('myAvatarSm');
+            if (!el || !myName) return;
+            el.className = 'my-avatar-sm ' + avatarColor(myName);
+            el.textContent = initial(myName);
+        }
+
+        // ── Render Rooms ──
+        function renderRooms(filter) {
+            const container = document.getElementById('roomList');
+            container.innerHTML = '';
+            const list = filter ? rooms.filter(r => r.toLowerCase().includes(filter.toLowerCase())) : rooms;
+            if (!list.length) {
+                container.innerHTML = '<div class="empty-rooms">No rooms found.<br>Create one with ➕</div>';
+                return;
+            }
+            list.forEach(r => {
+                const div = document.createElement('div');
+                div.className = 'room-item' + (r === currentRoom ? ' active' : '');
+                div.innerHTML = `
+      <div class="room-avatar ${avatarColor(r)}">${initial(r)}</div>
+      <div class="room-info">
+        <div class="room-name">${escHTML(r)}</div>
+        <div class="room-preview" id="prev-${CSS.escape(r)}">Tap to open chat</div>
+      </div>
+      <div class="room-meta">
+        <div class="room-time" id="time-${CSS.escape(r)}"></div>
+        <button class="room-del" title="Delete room" onclick="event.stopPropagation();deleteRoom('${r.replace(/'/g, "\\'")}')">🗑</button>
+      </div>
+    `;
+                div.onclick = () => { openRoom(r); closeSidebarMobile(); };
+                container.appendChild(div);
+            });
+        }
+        function filterRooms() { renderRooms(document.getElementById('searchInput').value); }
 
         // ── Open Room ──
         function openRoom(room) {
             currentRoom = room;
+            localStorage.setItem('chatLastRoom', room);
+            history.replaceState(null, '', '?room=' + encodeURIComponent(room));
             if (unsubscribe) unsubscribe();
 
-            document.getElementById('messagesContainer').innerHTML = '';
+            const av = document.getElementById('headerAvatar');
+            av.className = 'chat-avatar ' + avatarColor(room);
+            av.textContent = initial(room);
+            document.getElementById('headerRoomName').textContent = room;
+
+            document.getElementById('welcomeScreen').style.display = 'none';
+            document.getElementById('chatHeader').style.display = 'flex';
+            const mc = document.getElementById('messagesContainer');
+            mc.style.display = 'flex'; mc.style.flexDirection = 'column';
+            document.getElementById('inputArea').style.display = 'flex';
+            mc.innerHTML = '';
+
+            renderRooms();
+            picker.classList.remove('open');
 
             unsubscribe = db.collection('rooms').doc(room).collection('msgs')
                 .orderBy('time')
                 .onSnapshot(snap => {
-
-                    // 🔔 NEW MESSAGE DETECTION
-                    snap.docChanges().forEach(change => {
-                        if (change.type === "added") {
-                            const m = change.doc.data();
-
-                            if (m.sender !== myName) {
-
-                                // 🔔 Browser Notification
-                                if (Notification.permission === "granted") {
-                                    new Notification(m.sender, {
-                                        body: m.text,
-                                        icon: "https://cdn-icons-png.flaticon.com/512/733/733585.png"
-                                    });
-                                }
-
-                                // 🟢 Title Blink
-                                if (document.hidden) {
-                                    startTitleBlink("New message from " + m.sender);
-                                }
-                            }
-                        }
-                    });
-
                     const box = document.getElementById('messagesContainer');
                     box.innerHTML = '';
+                    let lastDate = '';
 
                     snap.forEach(docSnap => {
                         const m = docSnap.data();
+                        const date = new Date(m.time);
+                        const dateStr = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+                        const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
                         const isMe = m.sender === myName;
+
+                        if (dateStr !== lastDate) {
+                            lastDate = dateStr;
+                            const dDiv = document.createElement('div');
+                            dDiv.className = 'date-divider';
+                            dDiv.innerHTML = `<span>${dateStr}</span>`;
+                            box.appendChild(dDiv);
+                        }
 
                         const row = document.createElement('div');
                         row.className = 'msg-row ' + (isMe ? 'out' : 'in');
-
+                        // "You" for my messages, actual sender name for others
+                        const label = isMe ? 'You' : (m.sender || 'Unknown');
                         row.innerHTML = `
-                        <div class="sender-name">${isMe ? 'You' : m.sender}</div>
-                        <div class="bubble">
-                            ${escHTML(m.text)}
-                        </div>
-                    `;
+          <div class="sender-name">${escHTML(label)}</div>
+          <div class="bubble">
+            ${escHTML(m.text)}
+            <div class="bubble-time">
+              ${timeStr}
+              ${isMe ? '<span class="tick">✓✓</span>' : ''}
+            </div>
+          </div>
+        `;
                         box.appendChild(row);
+
+                        // Sidebar preview
+                        const prevEl = document.getElementById('prev-' + CSS.escape(room));
+                        const timeEl = document.getElementById('time-' + CSS.escape(room));
+                        if (prevEl) prevEl.textContent = (isMe ? 'You: ' : (m.sender ? m.sender + ': ' : '')) + m.text;
+                        if (timeEl) timeEl.textContent = timeStr;
                     });
 
                     box.scrollTop = box.scrollHeight;
                 });
         }
 
-        // ── Send ──
+        // ── Send Message ──
         function sendMsg() {
             const input = document.getElementById('msgInput');
             const text = input.value.trim();
             if (!text || !currentRoom) return;
-
-            db.collection('rooms').doc(currentRoom).collection('msgs')
-                .add({ text, sender: myName, time: Date.now() });
-
-            input.value = '';
+            db.collection('rooms').doc(currentRoom).collection('msgs').add({ text, sender: myName, time: Date.now() });
+            input.value = ''; input.style.height = 'auto';
+            picker.classList.remove('open'); input.focus();
         }
 
-        // ── Input ──
+        // ── Delete Room ──
+        function deleteRoom(room) {
+            if (!confirm(`Delete room "${room}" and all messages?`)) return;
+            db.collection('rooms').doc(room).collection('msgs').get().then(snap => {
+                snap.forEach(d => d.ref.delete());
+                db.collection('rooms').doc(room).delete();
+            });
+            rooms = rooms.filter(r => r !== room);
+            localStorage.setItem('chatRooms', JSON.stringify(rooms));
+            renderRooms();
+            if (currentRoom === room) {
+                currentRoom = null;
+                if (unsubscribe) unsubscribe();
+                document.getElementById('messagesContainer').innerHTML = '';
+                document.getElementById('welcomeScreen').style.display = 'flex';
+                document.getElementById('chatHeader').style.display = 'none';
+                document.getElementById('messagesContainer').style.display = 'none';
+                document.getElementById('inputArea').style.display = 'none';
+                history.replaceState(null, '', window.location.pathname);
+            }
+            showToast(`Room "${room}" deleted`);
+        }
+
+        // ── Name Modal ──
+        function openNameModal() {
+            document.getElementById('newNameInput').value = myName;
+            document.getElementById('usernameModal').style.display = 'flex';
+            setTimeout(() => document.getElementById('newNameInput').focus(), 100);
+        }
+        function closeNameModal() { document.getElementById('usernameModal').style.display = 'none'; }
+        function saveName() {
+            const n = document.getElementById('newNameInput').value.trim();
+            if (!n) { showToast('Name cannot be empty!'); return; }
+            myName = n; localStorage.setItem('chatUsername', n);
+            updateMyAvatar(); closeNameModal();
+            showToast('Name updated to: ' + n);
+        }
+
+        // ── Room Modal ──
+        function openRoomModal() {
+            document.getElementById('newRoomInput').value = '';
+            document.getElementById('newRoomModal').style.display = 'flex';
+            setTimeout(() => document.getElementById('newRoomInput').focus(), 100);
+        }
+        function closeRoomModal() { document.getElementById('newRoomModal').style.display = 'none'; }
+        function createRoomFromModal() {
+            const name = document.getElementById('newRoomInput').value.trim();
+            if (!name) { showToast('Please enter a room name!'); return; }
+            if (!rooms.includes(name)) { rooms.push(name); localStorage.setItem('chatRooms', JSON.stringify(rooms)); }
+            closeRoomModal(); renderRooms(); openRoom(name); closeSidebarMobile();
+            showToast(`Room "${name}" created!`);
+        }
+
+        // ── Copy Invite Link ──
+        function copyCurrentLink() {
+            const url = currentRoom
+                ? `${location.origin}${location.pathname}?room=${encodeURIComponent(currentRoom)}`
+                : location.href;
+            navigator.clipboard.writeText(url).then(() => showToast('Invite link copied! 🔗'));
+        }
+
+        // ── Mobile Sidebar ──
+        function openSidebarMobile() {
+            if (window.innerWidth > 700) return;
+            document.getElementById('sidebar').classList.remove('hidden');
+            document.getElementById('overlay').classList.remove('hidden');
+        }
+        function closeSidebarMobile() {
+            if (window.innerWidth > 700) return;
+            document.getElementById('sidebar').classList.add('hidden');
+            document.getElementById('overlay').classList.add('hidden');
+        }
+
+        // ── Textarea Auto-grow ──
         function autoGrow(el) {
             el.style.height = 'auto';
             el.style.height = Math.min(el.scrollHeight, 120) + 'px';
         }
-
-        document.getElementById('msgInput').addEventListener('input', function () {
-            autoGrow(this);
+        document.getElementById('msgInput').addEventListener('input', function () { autoGrow(this); });
+        document.getElementById('msgInput').addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); }
         });
 
+        // Close emoji on outside click
+        document.addEventListener('click', e => {
+            if (!picker.contains(e.target) && !e.target.classList.contains('emoji-btn')) picker.classList.remove('open');
+        });
+
+        // Modal backdrop click to close
+        document.getElementById('usernameModal').addEventListener('click', e => { if (e.target === e.currentTarget) closeNameModal(); });
+        document.getElementById('newRoomModal').addEventListener('click', e => { if (e.target === e.currentTarget) closeRoomModal(); });
+
+        // Enter key in modals
+        document.getElementById('newNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') saveName(); });
+        document.getElementById('newRoomInput').addEventListener('keydown', e => { if (e.key === 'Enter') createRoomFromModal(); });
+
+        // ── BOOT ──
+        if (myName) {
+            document.getElementById('setupScreen').style.display = 'none';
+            if (roomFromURL && !rooms.includes(roomFromURL)) {
+                rooms.push(roomFromURL);
+                localStorage.setItem('chatRooms', JSON.stringify(rooms));
+            }
+            if (rooms.length) {
+                initApp();
+                const toOpen = roomFromURL || localStorage.getItem('chatLastRoom') || rooms[0];
+                if (toOpen && rooms.includes(toOpen)) {
+                    openRoom(toOpen);
+                    if (window.innerWidth <= 700) document.getElementById('sidebar').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('setupScreen').style.display = 'flex';
+            }
+        } else {
+            // New user coming via shared link — pre-fill room name
+            if (roomFromURL) {
+                document.getElementById('setupRoom').value = roomFromURL;
+                document.getElementById('setupRoom').readOnly = true;
+            }
+        }
+
+        // ── iOS Safari / Android keyboard fix ──
+        // When virtual keyboard opens, it shrinks the viewport.
+        // We pin the app height to the visual viewport so input stays visible.
+        function applyViewportFix() {
+            const vh = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+            document.body.style.height = vh + 'px';
+        }
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', applyViewportFix);
+            window.visualViewport.addEventListener('scroll', applyViewportFix);
+        }
+        window.addEventListener('resize', applyViewportFix);
+        applyViewportFix();
+
+        if (window.innerWidth <= 700 && myName) {
+            document.getElementById('sidebar').classList.remove('hidden');
+        }
     </script>
 </body>
 
